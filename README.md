@@ -2,7 +2,7 @@
 
 Repository with code used for the paper "Graph Sphere: From Nodes to Supernodes
 in Graphical Models" by Willem van den Boom, Maria De Iorio, Alexandros Beskos
-and Ajay Jasra (in preparation)
+and Ajay Jasra ([arXiv:2310.11741](https://arxiv.org/abs/2310.11741))
 
 
 ## Description of files
