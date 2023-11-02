@@ -15,8 +15,8 @@ folder [src](src/).
 * [`gene.R`](gene.R) contains code for the application with gene expression
 data. [`gene.R`](gene.R) loads [`graph_sphere_MCMC.R`](graph_sphere_MCMC.R).
 
-* [`simulation.R`](simulation.R) contains ode for the simulation studies in
-Appendix H of Supplementary Material. [`simulation.R`](simulation.R) loads
+* [`simulations.R`](simulations.R) contains ode for the simulation studies in
+Appendix H of Supplementary Material. [`simulations.R`](simulations.R) loads
 [`graph_sphere_MCMC.R`](graph_sphere_MCMC.R).
 
 * The folder [src](src/) contains C++ scripts for MCMC and a Laplace
