@@ -208,7 +208,7 @@ blaze::DynamicMatrix<double> rgwish_body(
 
             double W_jj = W(j, j);
             column(W, j) = W_beta_hat;
-            // The next line is not need as Blaze enforces the symmetry of `W`.
+            // The next line is not needed as Blaze enforces symmetry of `W`.
             // row(W, j) = trans(W_beta_hat);
             W(j, j) = W_jj;
         }
