@@ -44,7 +44,6 @@ get_lat_fac_data <- function (supernode_sizes, superedge) {
   
   if (superedge) {
     # Introduce dependence between the latent factors.
-    lat_fac[, 2] <- sqrt(0.1) * lat_fac[, 1] + sqrt(0.9) * lat_fac[, 2]
     lat_fac[, K] <- sqrt(0.05) * lat_fac[, K - 1L] + sqrt(0.95) * lat_fac[, K]
   }
   
