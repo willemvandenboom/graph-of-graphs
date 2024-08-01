@@ -538,7 +538,9 @@ take_move_step <- function (
 ## The following functions are used to implement the locally balanced informed
 ## proposal.
 
-compute_log_base_proposal <- function (n_centers, n_centers_prop, p, k, move) {
+compute_log_base_proposal <- function (
+  n_centers, n_centers_prop, p, k, move, n_death = n_centers
+) {
   # If `move = TRUE`, then only consider moves.
   # If `move = FALSE`, then only consider birth/death steps.
   log_prob_bdm <- rep(-log(3), 3L)
@@ -557,9 +559,8 @@ compute_log_base_proposal <- function (n_centers, n_centers_prop, p, k, move) {
     return (log_prob_bdm[1] - log(p - n_centers) - log_n_G_birth)
   }
   
-  if (n_centers_prop == n_centers - 1L) {  # Death
-    return (log_prob_bdm[2] - log(n_centers))
-  }
+  # Death
+  if (n_centers_prop == n_centers - 1L) return (log_prob_bdm[2] - log(n_death))
   
   if (n_centers_prop == n_centers) {  # Move
     return (log_prob_bdm[3] - log(n_centers) - log(p - n_centers))
@@ -674,9 +675,7 @@ prop2ind <- function (centers_prop, G_prop, centers, G, k, move) {
     return (n_birth + ind_del)
   }
   
-  n_death <- if (isTRUE(move) | n_centers == 1L) 0L else {
-    n_centers - sum(colSums(G) > k)
-  }
+  n_death <- if (isTRUE(move) | n_centers == 1L) 0L else sum(colSums(G) <= k)
   
   if (length(diff_ind) == 2L & n_centers == sum(centers_prop)) {  # Move
     ind_add <- which(centers_prop[!centers] != centers[!centers])
@@ -723,11 +722,12 @@ compute_log_prod <- function (
   }
   
   # Death
+  n_death <- if (isTRUE(move) | n_centers == 1L) 0L else sum(colSums(G) <= k)
+  
   log_prop_ratio_death <- compute_log_base_proposal(
     n_centers - 1L, n_centers, p, k, move
-  ) - compute_log_base_proposal(n_centers, n_centers - 1L, p, k, move)
+  ) - compute_log_base_proposal(n_centers, n_centers - 1L, p, k, move, n_death)
   
-  n_death <- if (isTRUE(move) | n_centers == 1L) 0L else sum(colSums(G) <= k)
   log_prod_death <- numeric(n_death)
   
   for (ind in seq_len(n_death)) {
@@ -789,7 +789,9 @@ take_MCMC_step_informed <- function (
   
   log_prop <- log_bal_fun(log_prod_cur$log_prod - tmp_cur$log_ret) + rep(c(
     compute_log_base_proposal(n_centers, n_centers + 1L, p, k, move),  # Birth
-    compute_log_base_proposal(n_centers, n_centers - 1L, p, k, move),  # Death
+    compute_log_base_proposal(  # Death
+      n_centers, n_centers - 1L, p, k, move, log_prod_cur$n_bdm[2]
+    ),
     compute_log_base_proposal(n_centers, n_centers, p, k, move)  # Move
   ), log_prod_cur$n_bdm)
   
@@ -818,7 +820,9 @@ take_MCMC_step_informed <- function (
     # Birth
     compute_log_base_proposal(n_centers_prop, n_centers_prop + 1L, p, k, move),
     # Death
-    compute_log_base_proposal(n_centers_prop, n_centers_prop - 1L, p, k, move),
+    compute_log_base_proposal(
+      n_centers_prop, n_centers_prop - 1L, p, k, move, log_prod_prop$n_bdm[2]
+    ),
     # Move
     compute_log_base_proposal(n_centers_prop, n_centers_prop, p, k, move)
   ), log_prod_prop$n_bdm)
