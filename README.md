@@ -1,24 +1,32 @@
-# graph-sphere
+# graph-of-graphs
 
-Repository with code used for the paper "Graph Sphere: From Nodes to Supernodes
-in Graphical Models" by Willem van den Boom, Maria De Iorio, Alexandros Beskos
-and Ajay Jasra ([arXiv:2310.11741](https://arxiv.org/abs/2310.11741))
+Repository with code used for the paper "Graph of Graphs: From Nodes to
+Supernodes in Graphical Models" by Maria De Iorio, Willem van den Boom,
+Alexandros Beskos, Ajay Jasra and Andrea Cremaschi
+([arXiv:2310.11741](https://arxiv.org/abs/2310.11741))
 
 
 ## Description of files
 
-* [`graph_sphere_MCMC.R`](graph_sphere_MCMC.R) implements the Markov chain
-Monte Carlo (MCMC) for the graph sphere model.
-[`graph_sphere_MCMC.R`](graph_sphere_MCMC.R) compiles the C++ code in the
-folder [src](src/).
+* [`graph_of_graphs_MCMC.R`](graph_of_graphs_MCMC.R) implements the Markov
+chain Monte Carlo (MCMC) for the graph of graphs model.
+[`graph_of_graphs_MCMC.R`](graph_of_graphs_MCMC.R) compiles the C++ code in the
+folder [`src`](src/).
 
 * [`gene.R`](gene.R) contains code for the application with gene expression
-data. [`gene.R`](gene.R) loads [`graph_sphere_MCMC.R`](graph_sphere_MCMC.R).
+data. [`gene.R`](gene.R) loads
+[`graph_of_graphs_MCMC.R`](graph_of_graphs_MCMC.R).
 
-* [`simulations.R`](simulations.R) contains ode for the simulation studies in
-Appendix H of Supplementary Material. [`simulations.R`](simulations.R) loads
-[`graph_sphere_MCMC.R`](graph_sphere_MCMC.R).
+* The folder [`simul`](simul/) contains code for the simulation studies in
+Supplementary Material. [`simul_lat_fac.R`](simul/simul_lat_fac.R) and
+[`simul_mvt.R`](simul/simul_mvt.R) load
+[`graph_of_graphs_MCMC.R`](graph_of_graphs_MCMC.R).
 
-* The folder [src](src/) contains C++ scripts for MCMC and a Laplace
+* The folder [`src`](src/) contains C++ scripts for MCMC and a Laplace
 approximation for Bayesian Gaussian graphical models (GGMs) with the
 *G*-Wishart distribution as prior on the precision matrix.
+
+* The folder [`misc`](misc/) contains scripts for miscellaneous other plots.
+
+* [`run_all.sh`](run_all.sh) is a shell script that provides a workflow for how
+to run the code.

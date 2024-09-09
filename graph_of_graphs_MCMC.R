@@ -1,25 +1,22 @@
-### Graph sphere: MCMC
+### Graph of graphs: Markov chain Monte Carlo
 
 # Implementation of the Markov chain Monte Carlo described in the paper "Graph
-# Sphere: From Nodes to Supernodes in Graphical Models" by Willem van den Boom,
-# Maria De Iorio, Alexandros Beskos and Ajay Jasra.
+# of Graphs: From Nodes to Supernodes in Graphical Models" by Maria De Iorio,
+# Willem van den Boom, Alexandros Beskos, Ajay Jasra and Andrea Cremaschi.
 
 
 
 # Install required packages
 pkgs <- c(
-  "abind", "BH", "latticeExtra", "matrixStats", "memoise", "mvtnorm", "qgam",
-  "Rcpp", "R.utils", "withr"
+  "abind", "BH", "CholWishart", "latticeExtra", "matrixStats", "memoise",
+  "mvtnorm", "RcppBlaze", "withr"
 )
 
 pkgs <- pkgs[!pkgs %in% rownames(installed.packages())]
 
 if (length(pkgs) > 0L) {
   print("Installing required packages...")
-  
-  install.packages(
-    pkgs = pkgs, dependencies = TRUE, repos = "https://cloud.r-project.org"
-  )
+  install.packages(pkgs = pkgs, repos = "https://cloud.r-project.org")
 }
 
 df_0 <- 3  # Degrees of freedom of the G-Wishart prior for the supergraph
@@ -51,7 +48,7 @@ withr::with_makevars(
 #' @param U The scatter matrix of the observations.
 #' @param n The number of observations constituting `U`.
 #' @return The symmetric adjacency matrix of the graph after the MCMC update.
-update_G_WWA <- function (adj, edge_prob, df_0, U, n) {
+update_G_WWA <- function (adj, edge_prob, df_0, U, n, n_edge) {
   p <- nrow(adj)
   
   return (tryCatch(
@@ -62,7 +59,7 @@ update_G_WWA <- function (adj, edge_prob, df_0, U, n) {
       df = df_0 + n,
       df_0 = df_0,
       rate = diag(p) + U,
-      n_edge = p,  # Number of single edge updates attempted in this MCMC update
+      n_edge = n_edge,  # Number of single edge updates attempted in this MCMC update
       seed = sample.int(n = .Machine$integer.max, size = 1L),
       loc_bal = FALSE
     ), error = function (e) {
@@ -75,8 +72,8 @@ update_G_WWA <- function (adj, edge_prob, df_0, U, n) {
 
 # Modified version of base::La.svd
 fast_svd <- function (x, nu = min(n, p), nv = min(n, p), n = NULL, p = NULL) {
-  if(is.null(n)) n <- nrow(x)
-  if(is.null(p)) p <- ncol(x)
+  if (is.null(n)) n <- nrow(x)
+  if (is.null(p)) p <- ncol(x)
   
   if (nu || nv) {
     np <- min(n, p)
@@ -127,6 +124,7 @@ compute_log_w_matrix <- function (X, coars_pow) {
   log_w_matrix <- matrix(data = NA_real_, nrow = p, ncol = p)
   
   for (i in 1:p) {
+    # Diagonal elements are included to compute the normalizing constant.
     log_w_matrix[i, i] <- lgamma(0.5 * delta_star) +
       0.5 * delta * log(D[i, i]) - 0.5 * n * log(pi) - lgamma(0.5 * delta) -
       0.5 * delta_star * log(D_star[i, i])
@@ -146,29 +144,26 @@ compute_log_w_matrix <- function (X, coars_pow) {
 
 # Compute the tree activation function.
 compute_log_tree_activation_f <- function (
-  log_w_matrix, p, eps = 1e-12
+    log_w_matrix, p, eps = 1e-12
 ) {
-  # Any terms that can be absorbed in the normalising constant of the
-  # tessellation prior are dropped. Thus, the function computes the log of
-  # $p_k^{2 - p_k} \sum_{E_k} \prod_{(i, j)\in E_k} w_{ij}$.
-  log_diag_Laplacian <- numeric(p)
-  
-  for (i in 1:p) log_diag_Laplacian[i] <- if (p == 1L) -Inf else {
-    matrixStats::logSumExp(log_w_matrix[i, -i])
+  if (p == 1L) log_diag_Laplacian <- -Inf else {
+    log_diag_Laplacian <- numeric(p)
+    
+    for (i in 1:p) {
+      log_diag_Laplacian[i] <- matrixStats::logSumExp(log_w_matrix[i, -i])
+    }
   }
   
+  # Compute the normalizing constant.
   log_ret <- (2L - p) * log(p) + sum(diag(as.matrix(log_w_matrix)))
   if (p == 2L) log_ret <- log_ret + log_diag_Laplacian[1]
   
   if (p > 2L) {
-    
-    # Cycle through all Laplacian minors to maximize numerical stability.
-    # Only if !use_fast_svd
-    n_count <- 1L
-    log_det <- NULL
-    count_det <- 0L
+    # Version of the Laplacian with scaling of rows and columns to ensure unit
+    # diagonal to reduce over- and underflow errors.
     Laplacian <- diag(p)
-    upper_ind <- upper.tri(Laplacian)
+    
+    log_det <- NULL
     
     for (i in 1:p) {
       Laplacian[i, -i] <- -exp(log_w_matrix[i, -i] - 0.5 * (
@@ -208,6 +203,28 @@ compute_log_tree_activation_f <- function (
   }
   
   return (log_ret)
+}
+
+
+# Avoid `CholWishart::lmvgamma` from returning an array
+lmvgamma <- function (x, p) return (as.double(CholWishart::lmvgamma(x, p)))
+
+
+# Compute the similarity function based on matrix t-distribution
+compute_log_simil_f_t <- function (X, n, p) {
+  delta <- 3  # Degrees of freedom of the Hyper Inverse Wishart prior
+  delta_star <- 3 + n
+  D <- diag(p)
+  D_star <- D + crossprod(X)
+  
+  exp_0 <- 0.5 * (delta + p - 1)
+  exp_star <- 0.5 * (delta_star + p - 1)
+  
+  return (
+    lmvgamma(x = exp_star, p = p) - 0.5 * n * p * log(pi) -
+      lmvgamma(x = exp_0, p = p) -
+      exp_star * as.double(determinant(D_star)$modulus)
+  )
 }
 
 
@@ -340,10 +357,10 @@ compute_U_unaugmented <- function (X, assignment) {
 
 
 compute_log_posterior_no_G <- function (
-  X, X_cor, centers, memoise_tree_activation_f, log_cohesion, nested
+    X, X_cor, centers, memoise_tree_activation_f, log_cohesion, nested
 ) {
   # Part of the posterior that does not vary with the supergraph G to make
-  # better use of memoization
+  # better use of memoisation
   # `centers` is an indicator vector indicating which nodes are centers.
   n <- NROW(X)
   p <- NCOL(X)
@@ -368,21 +385,16 @@ compute_log_posterior_no_G <- function (
     U_augmented_diag <- n * rep(1, p - n_centers)
   }
   
-  # Add p(G | C) term, uniform over all possible supergraphs
-  log_ret <- log_p_C - if (nested) 0 else {
-    ((n_centers * (n_centers - 1L)) %/% 2L) * log(2)
-  }
-  
   return (list(
-    log_ret = log_ret, U_unaugmented = U_unaugmented,
+    log_ret = log_p_C, U_unaugmented = U_unaugmented,
     U_augmented_diag = U_augmented_diag, assignment = assignment, n = n
   ))
 }
 
 
 compute_log_posterior <- function (
-  centers, G, memoise_tree_activation_f, memoise_posterior_no_G,
-  memoise_Laplace, coars_pow, nested
+    centers, G, memoise_tree_activation_f, memoise_posterior_no_G,
+    memoise_Laplace, coars_pow_lik, nested, pi_se
 ) {
   # `centers` is an indicator vector indicating which nodes are centers.
   res <- memoise_posterior_no_G(centers, memoise_tree_activation_f)
@@ -390,12 +402,19 @@ compute_log_posterior <- function (
   if (!nested) {
     tmp <- compute_log_p_Y(
       res$U_unaugmented, res$U_augmented_diag, G, res$assignment, res$n,
-      memoise_Laplace, coars_pow
+      memoise_Laplace, coars_pow_lik
     )
     
     res$log_ret <- res$log_ret + tmp$log_ret
     res$log_p_Y <- tmp$log_ret
     res$log_p_Y_unaugmented <- tmp$log_p_Y_unaugmented
+    
+    # Add prior on supergraph.
+    n_centers <- sum(centers)
+    n_edges <- sum(G[upper.tri(G)])
+    
+    res$log_ret <- res$log_ret + n_edges * log(pi_se) +
+      (choose(n_centers, 2L) - n_edges) * log(1 - pi_se)
   }
   
   if (is.na(res$log_ret)) stop("log_post is NA!")
@@ -406,9 +425,11 @@ compute_log_posterior <- function (
 }
 
 
-update_G <- function (G, n, tmp_cur, memoise_Laplace) {
+update_G <- function (G, n, tmp_cur, memoise_Laplace, pi_se) {
+  G_old <- G
+  
   G <- update_G_Laplace(
-    adj = G, edge_prob = 0.5, U = tmp_cur$U, n, memoise_Laplace
+    adj = G_old, edge_prob = pi_se, U = tmp_cur$U, n, memoise_Laplace
   )
   
   # Update `tmp_cur` accordingly.
@@ -416,6 +437,13 @@ update_G <- function (G, n, tmp_cur, memoise_Laplace) {
   log_diff <- log_p_Y_unaugmented - tmp_cur$log_p_Y_unaugmented
   tmp_cur$log_p_Y_unaugmented <- log_p_Y_unaugmented
   tmp_cur$log_ret <- tmp_cur$log_ret + log_diff
+  n_edges <- sum(G[upper.tri(G)])
+  n_edges_old <- sum(G_old[upper.tri(G_old)])
+  
+  # Add term corresponding to the supergraph prior.
+  if (n_edges != n_edges_old) tmp_cur$log_ret <-
+    tmp_cur$log_ret + (n_edges - n_edges_old) * (log(pi_se) - log(1 - pi_se))
+  
   return (list(G = G, tmp_cur = tmp_cur))
 }
 
@@ -424,8 +452,9 @@ update_G <- function (G, n, tmp_cur, memoise_Laplace) {
 # This algorithm is based around the addition and deletion of centers to
 # generate birth-death steps for supernodes.
 take_birth_death_step <- function (
-  centers, G, tmp_cur, memoise_tree_activation_f, memoise_posterior_no_G,
-  memoise_Laplace, coars_pow, nested
+  X_cor, assignment, pi_se, pi_se_prop, centers, G, tmp_cur,
+  memoise_tree_activation_f, memoise_posterior_no_G, memoise_Laplace,
+  coars_pow_prior, coars_pow_lik, nested
 ) {
   p <- length(centers)
   n_centers <- sum(centers)
@@ -434,413 +463,281 @@ take_birth_death_step <- function (
   prob_birth <- 0.5
   if (n_centers == 1L) prob_birth <- 1
   if (n_centers == p) prob_birth <- 0
-  birth <- runif(1L) < prob_birth
+  birth <- (runif(1L) <= prob_birth)
+  
   centers_prop <- centers
   
   if (birth) {  # Birth proposal
     tmp <- sample.int(n = p - n_centers, size = 1L)
     centers_prop[!centers][tmp] <- TRUE
+    n_centers_prop <- n_centers + 1
+    
+    # New assignments
+    assignment_prop <- centers2tessellation(X_cor, centers_prop)
+    # find index of the new supernode
     sampled_supernode <- sum(centers_prop[1:which(centers_prop != centers)])
-    G_prop <- matrix(0L, nrow = n_centers + 1L, ncol = n_centers + 1L)
-    G_prop[-sampled_supernode, -sampled_supernode] <- G
     
-    G_prop[sampled_supernode, -sampled_supernode] <- rbinom(
-      n = n_centers, size = 1L, prob = 0.5
-    )
+    # Find which supernodes contain the same variables as before and which have
+    # changed.
+    supernode_ischanged <- rep(FALSE, n_centers)
+    out_h <- outer(assignment_prop, assignment_prop, "==")
     
-    G_prop[-sampled_supernode, sampled_supernode] <- G_prop[
-      sampled_supernode, -sampled_supernode
-    ]
+    for (h in 1:n_centers) {
+      ind_h <- which(assignment == h)
+      
+      if (
+        (sum(out_h[ind_h, ind_h] == 0) > 0) ||
+          (sum(out_h[ind_h, -ind_h] == 1) > 0)
+      ) supernode_ischanged[h] <- TRUE
+    }
     
-    R <- (ifelse(
-      n_centers + 1L == p, 1, 1 / 2
-    ) / (n_centers + 1L)) / (prob_birth / (p - n_centers))
+    # Extra supernode goes on the outer edges of adj matrix.
+    G_prop <- matrix(NA, nrow = n_centers_prop, ncol = n_centers_prop)
+    diag(G_prop) <- 0
     
-    # Add proposal term related to G.
-    if (!nested) R <- R / 0.5^n_centers
+    # Nodes that did not change
+    unchanged_nodes_G <- c(1:n_centers)[!supernode_ischanged]
+    
+    unchanged_nodes_prop <-
+      unchanged_nodes_G + as.numeric(unchanged_nodes_G > sampled_supernode)
+    
+    if (length(unchanged_nodes_G) > 1L) {
+      G_prop[unchanged_nodes_prop,unchanged_nodes_prop] <-
+        G[unchanged_nodes_G,unchanged_nodes_G]
+    }
+    
+    # Nodes that changed
+    changed_nodes_prop <- setdiff(c(1:n_centers_prop), unchanged_nodes_prop)
+    ncount_G_prop <- sum(is.na(G_prop)) / 2
+    ncount_G <- ncount_G_prop - n_centers
+    nedges_G_prop <- 0
+    nedges_G <- 0
+    
+    if (length(changed_nodes_prop) > 0) {
+      for (h1 in changed_nodes_prop) {
+        for (h2 in (1:n_centers_prop)[-h1]) {
+          if (is.na(G_prop[h1,h2])) {
+            G_prop[h1,h2] <- as.numeric(runif(1L) <= pi_se_prop)
+            G_prop[h2,h1] <- G_prop[h1,h2]
+            nedges_G_prop <- nedges_G_prop + G_prop[h1,h2]
+            
+            if ((h1 != sampled_supernode) & (h2 != sampled_supernode)) {
+              nedges_G <- nedges_G + G[
+                h1 - as.numeric(h1 > sampled_supernode),
+                h2 - as.numeric(h2 > sampled_supernode)
+              ]
+            }
+          }
+        }
+      }
+    }
+    
+    # Add discrete uniform for choice of center to add/remove.
+    R <- log(p - n_centers) - log(n_centers_prop)
+    
+    if (!nested) {
+      # Proposal term considers the difference in number of edges times logit.
+      R <- R + (nedges_G - nedges_G_prop) * log(pi_se_prop) -
+        (n_centers + nedges_G - nedges_G_prop) * log(1 - pi_se_prop)
+    }
   } else {  # Death proposal
     sampled_supernode <- sample.int(n = n_centers, size = 1L)
     centers_prop[centers][sampled_supernode] <- FALSE
-    G_prop <- G[-sampled_supernode, -sampled_supernode, drop = FALSE]
+    n_centers_prop <- n_centers - 1L
     
-    R <- (ifelse(
-      n_centers == 2L, 1, 1 / 2
-    ) / (p - n_centers + 1L)) / ((1 - prob_birth) / n_centers)
+    # New assignments
+    assignment_prop <- centers2tessellation(X_cor, centers_prop)
     
-    # Add proposal term related to G.
-    if (!nested) R <- R * 0.5^(n_centers - 1L)
+    # Find which supernodes contain the same variables as before and which have
+    # changed.
+    supernode_ischanged <- rep(FALSE, n_centers)
+    out_h <- outer(assignment_prop, assignment_prop, "==")
+    
+    for (h in 1:n_centers) {
+      ind_h <- which(assignment == h)
+      
+      if (
+        (sum(out_h[ind_h, ind_h] == 0) > 0) ||
+          (sum(out_h[ind_h, -ind_h] == 1) > 0)
+      ) supernode_ischanged[h] <- TRUE
+    }
+    
+    # Extra supernode goes on the outer edges of adj matrix.
+    G_prop <- matrix(NA, nrow = n_centers_prop, ncol = n_centers_prop)
+    diag(G_prop) <- 0
+    
+    # Nodes that did not change
+    unchanged_nodes_G <- c(1:n_centers)[!supernode_ischanged]
+    
+    unchanged_nodes_prop <-
+      unchanged_nodes_G - as.numeric(unchanged_nodes_G > sampled_supernode)
+    
+    if (length(unchanged_nodes_G) > 1) {
+      G_prop[unchanged_nodes_prop, unchanged_nodes_prop] <-
+        G[unchanged_nodes_G, unchanged_nodes_G]
+    }
+    
+    # Nodes that changed
+    changed_nodes_prop <- setdiff(
+      c(1:n_centers)[supernode_ischanged], sampled_supernode
+    )
+    
+    changed_nodes_prop <- changed_nodes_prop - as.numeric(
+      changed_nodes_prop > sampled_supernode
+    )
+    
+    ncount_G_prop <- sum(is.na(G_prop)) / 2
+    ncount_G <- ncount_G_prop + n_centers_prop
+    nedges_G_prop <- 0
+    nedges_G <- 0
+    
+    if (length(changed_nodes_prop) > 0) {
+      for (h1 in changed_nodes_prop) {
+        for (h2 in (1:n_centers_prop)[-h1]) {
+          if (is.na(G_prop[h1,h2])) {
+            G_prop[h1,h2] <- as.numeric(runif(1L) <= pi_se_prop)
+            G_prop[h2,h1] <- G_prop[h1,h2]
+            nedges_G_prop <- nedges_G_prop + G_prop[h1,h2]
+            
+            nedges_G <- nedges_G + G[
+              h1 + as.numeric(h1 >= sampled_supernode),
+              h2 + as.numeric(h2 >= sampled_supernode)
+            ]
+          }
+        }
+      }
+      
+      # Count removed part.
+      h1 <- sampled_supernode
+      for (h2 in (1:n_centers)[-h1]) nedges_G <- nedges_G + G[h1, h2]
+    }
+    
+    # Add discrete uniform for choice of center to add/remove.
+    R <- log(n_centers) - log(p - n_centers_prop)
+    
+    if (!nested) {
+      # Proposal term considers the difference in number of edges times logit
+      R <- R + (nedges_G - nedges_G_prop) * log(pi_se_prop) -
+        (1L - n_centers + nedges_G - nedges_G_prop) * log(1 - pi_se_prop)
+    }
+    
+  }
+  
+  # Add birth/death probabilities
+  if (prob_birth == 1 || prob_birth == 0) {
+    R <- R - log(2)
+  } else {
+    R <- R + (1 - 2 * as.numeric(birth)) * (
+      log(prob_birth) - log(1 - prob_birth)
+    )
   }
   
   tmp_prop <- compute_log_posterior(
     centers_prop, G_prop, memoise_tree_activation_f, memoise_posterior_no_G,
-    memoise_Laplace, coars_pow, nested
+    memoise_Laplace, coars_pow_lik, nested, pi_se
   )
   
-  if(runif(1) < R * exp(tmp_prop$log_ret - tmp_cur$log_ret)) {
+  if (runif(1L) < exp(R + tmp_prop$log_ret - tmp_cur$log_ret)) {
+    assignment <- assignment_prop
     centers <- centers_prop
     G <- G_prop
     tmp_cur <- tmp_prop
   }
   
-  return (list(centers = centers, G = G, tmp_cur = tmp_cur))
+  return (list(assignment = assignment, centers = centers, G = G, tmp_cur = tmp_cur))
 }
 
 
 # Move MCMC step
 take_move_step <- function (
-    centers, G, tmp_cur, memoise_tree_activation_f, memoise_posterior_no_G,
-    memoise_Laplace, coars_pow, nested
+  X_cor, assignment, pi_se, pi_se_prop, centers, G, tmp_cur,
+  memoise_tree_activation_f, memoise_posterior_no_G, memoise_Laplace,
+  coars_pow_prior, coars_pow_lik, nested
 ) {
   p <- length(centers)
   n_centers <- sum(centers)
   
-  if (n_centers == p) {
-    return (list(centers = centers, G = G, tmp_cur = tmp_cur))
-  }
+  if (n_centers == p) return (
+    list(assignment = assignment, centers = centers, G = G, tmp_cur = tmp_cur)
+  )
   
   # Center index of node i that is no longer a center in the proposal
   i_c <- sample.int(n = n_centers, size = 1L)
   
   centers_prop <- centers
   centers_prop[centers][i_c] <- FALSE
-  centers_prop[!centers][sample.int(n = p - n_centers, size = 1L)] <- TRUE
   
-  # Center index of node j that is a new center in the proposal
-  j_c <- sum(centers_prop[1:which(centers_prop & !centers)])
+  centers_prop[!centers_prop][sample.int(n = sum(!centers_prop), size = 1L)] <-
+    TRUE
   
-  # Relabel the supernodes in the supergraph according to the proposed change to
-  # `centers`.
-  relabel <- if (i_c == j_c) 1:n_centers else if (i_c < j_c) c(
-    seq_len(i_c - 1L), j_c, i_c + seq_len(j_c - 1L - i_c), i_c,
-    j_c + seq_len(n_centers - j_c)
-  ) else c(
-    seq_len(j_c - 1L), i_c, j_c + seq_len(i_c - 1L - j_c), j_c,
-    i_c + seq_len(n_centers - i_c)
-  )
+  # new assignments
+  assignment_prop <- centers2tessellation(X_cor, centers_prop)
   
-  G_prop <- G[relabel, relabel, drop = FALSE]
+  ass_tab <- table(assignment, assignment_prop)
   
-  tmp_prop <- compute_log_posterior(
-    centers_prop, G_prop, memoise_tree_activation_f,
-    memoise_posterior_no_G, memoise_Laplace, coars_pow, nested
-  )
+  # Find which supernodes contain the same variables as before and which have
+  # changed.
   
-  if(runif(1) < exp(tmp_prop$log_ret - tmp_cur$log_ret)) {
-    centers <- centers_prop
-    G <- G_prop
-    tmp_cur <- tmp_prop
-  }
+  supernode_ischanged <- rep(FALSE, n_centers)
   
-  return (list(centers = centers, G = G, tmp_cur = tmp_cur))
-}
-
-
-## The following functions are used to implement the locally balanced informed
-## proposal.
-
-compute_log_base_proposal <- function (
-  n_centers, n_centers_prop, p, k, move, n_death = n_centers
-) {
-  # If `move = TRUE`, then only consider moves.
-  # If `move = FALSE`, then only consider birth/death steps.
-  log_prob_bdm <- rep(-log(3), 3L)
-  if (n_centers == p) log_prob_bdm <- c(-Inf, 0, -Inf)
-  if (isTRUE(move)) log_prob_bdm <- c(-Inf, -Inf, 0)
-  
-  if (n_centers == 1L) log_prob_bdm <- if (isFALSE(move)) {
-    c(0, -Inf, -Inf)
-  } else log(c(0.5, 0, 0.5))
-  
-  if (n_centers_prop == n_centers + 1L) {  # Birth
-    log_n_G_birth <- if (k >= n_centers) n_centers * log(2) else {
-      matrixStats::logSumExp(lchoose(n_centers, 0:k))
+  for (h in 1:n_centers) {
+    if (sum(ass_tab[h, ] > 0) > 1 || sum(ass_tab[, h] > 0) > 1) {
+      supernode_ischanged[h] <- TRUE
     }
-    
-    return (log_prob_bdm[1] - log(p - n_centers) - log_n_G_birth)
   }
   
-  # Death
-  if (n_centers_prop == n_centers - 1L) return (log_prob_bdm[2] - log(n_death))
+  # Propose new edges uniformly at random for those supernodes that are
+  # different.
+  G_prop <- G * NA
+  diag(G_prop) <- 0
   
-  if (n_centers_prop == n_centers) {  # Move
-    return (log_prob_bdm[3] - log(n_centers) - log(p - n_centers))
-  }
+  unchanged_nodes <- c(1:n_centers)[!supernode_ischanged]
   
-  return (-Inf)
-}
-
-
-ind2prop <- function (prop_ind, centers, G, k, move = NA) {
-  # If `move = TRUE`, then only consider moves.
-  # If `move = FALSE`, then only consider birth/death steps.
-  p <- length(centers)
-  n_centers <- sum(centers)
+  if (length(unchanged_nodes) > 1) G_prop[unchanged_nodes,unchanged_nodes] <-
+    G[unchanged_nodes,unchanged_nodes]
   
-  # Birth
-  n_G_birth <- if (isTRUE(move) | n_centers == p) 0L else {
-    as.integer(if (k == Inf) 2^n_centers else sum(choose(n_centers, 0:k)))
-  }
+  changed_nodes <- c(1:n_centers)[supernode_ischanged]
+  n_changed_nodes <- length(changed_nodes)
+  nedges_G_prop <- 0
+  nedges_G <- 0
   
-  n_birth <- (p - n_centers) * n_G_birth
-  
-  if (prop_ind <= n_birth) {  # Birth
-    ind_add <- (prop_ind - 1L) %/% n_G_birth + 1L
-    G_prop_ind <- (prop_ind - 1L) %% n_G_birth + 1L
-    centers_prop <- centers
-    centers_prop[!centers][ind_add] <- TRUE
-    new_supernode <- sum(centers_prop[1:which(centers_prop != centers)])
-    G_prop <- matrix(0L, nrow = n_centers + 1L, ncol = n_centers + 1L)
-    G_prop[-new_supernode, -new_supernode] <- G
-    
-     if (k == Inf) G_prop[new_supernode, -new_supernode][min(
-      n_centers - ceiling(log2(G_prop_ind) - 1), n_centers
-    ):n_centers] <- as.integer(
-      strsplit(R.utils::intToBin(G_prop_ind - 1L), split = "")[[1]]
-    ) else if (k == 1L) {
-      if (G_prop_ind > 1L) {
-        G_prop[new_supernode, -new_supernode][G_prop_ind - 1L] <- 1L
+  if (n_changed_nodes > 0) {
+    for (h1 in changed_nodes) {
+      for (h2 in (1:n_centers)[-h1]) {
+        if (is.na(G_prop[h1,h2])) {
+          G_prop[h1,h2] <- as.numeric(runif(1L) <= pi_se_prop)
+          G_prop[h2,h1] <- G_prop[h1,h2]
+          nedges_G_prop <- nedges_G_prop + G_prop[h1,h2]
+          nedges_G <- nedges_G + G[h1,h2]
+        }
       }
-    } else stop("Only k = 1,Inf have been implemented.")
-    
-    G_prop[-new_supernode, new_supernode] <- G_prop[
-      new_supernode, -new_supernode
-    ]
-    
-    return (list(centers_prop = centers_prop, G_prop = G_prop))
+    }
   }
   
-  prop_ind <- prop_ind - n_birth
-  n_death <- if (isTRUE(move) | n_centers == 1L) 0L else {
-    death_candidates <- which(colSums(G) <= k)
-    length(death_candidates)
-  }
-  
-  if (prop_ind <= n_death) {  # Death
-    ind_del <- death_candidates[prop_ind]
-    centers_prop <- centers
-    centers_prop[centers][ind_del] <- FALSE
-    G_prop <- G[-ind_del, -ind_del, drop = FALSE]
-    return (list(centers_prop = centers_prop, G_prop = G_prop))
-  }
-  
-  prop_ind <- prop_ind - n_death
-  n_move <- if (isFALSE(move)) 0L else n_centers * (p - n_centers)
-  
-  if (prop_ind <= n_move) {  # Move
-    ind_del <- (prop_ind - 1L) %/% (p - n_centers) + 1L
-    ind_add <- (prop_ind - 1L) %% (p - n_centers) + 1L
-    centers_prop <- centers
-    centers_prop[centers][ind_del] <- FALSE
-    centers_prop[!centers][ind_add] <- TRUE
-    return (list(centers_prop = centers_prop, G_prop = G))
-  }
-  
-  stop("`prop_ind` is too large.")
-}
-
-
-prop2ind <- function (centers_prop, G_prop, centers, G, k, move) {
-  # If `move = TRUE`, then only consider moves.
-  p <- length(centers)
-  n_centers <- sum(centers)
-  diff_ind <- which(centers_prop != centers)
-  
-  n_G_birth <- if (isTRUE(move) | n_centers == p) 0L else {
-    as.integer(if (k == Inf) 2^n_centers else sum(choose(n_centers, 0:k)))
-  }
-  
-  if (length(diff_ind) == 1L & !centers[diff_ind[1]]) {  # Birth
-    ind_add <- which(centers_prop[!centers] != centers[!centers])
-    new_supernode <- sum(centers_prop[1:which(centers_prop != centers)])
-    
-    G_prop_ind <- if (k == Inf) strtoi(
-      x = paste(G_prop[-new_supernode, new_supernode], collapse = ""), base = 2L
-    ) + 1L else if (k == 1L) {
-      tmp <- G_prop[-new_supernode, new_supernode] == 1L
-      if (any(tmp)) which(tmp) + 1L else 1L
-    } else stop("Only k = 1,Inf implemented so far.")
-    
-    return (n_G_birth * (ind_add - 1L) + G_prop_ind)
-  }
-  
-  n_birth <- (p - n_centers) * n_G_birth
-  
-  if (length(diff_ind) == 1L & centers[diff_ind[1]]) {  # Death
-    ind_del <- which(!centers_prop[centers])
-    
-    ind_del <- ind_del - sum(
-      colSums(G[, seq_len(ind_del - 1L), drop = FALSE]) > k
-    )
-    
-    return (n_birth + ind_del)
-  }
-  
-  n_death <- if (isTRUE(move) | n_centers == 1L) 0L else sum(colSums(G) <= k)
-  
-  if (length(diff_ind) == 2L & n_centers == sum(centers_prop)) {  # Move
-    ind_add <- which(centers_prop[!centers] != centers[!centers])
-    ind_del <- which(centers_prop[centers] != centers[centers])
-    return (n_birth + n_death + (p - n_centers) * (ind_del - 1L) + ind_add)
-  }
-  
-  stop("Proposed values are not in the neighborhood of the current values.")
-}
-
-
-compute_log_prod <- function (
-  centers, G, memoise_tree_activation_f, memoise_posterior_no_G,
-  memoise_Laplace, coars_pow, nested, k, move
-) {
-  # Locally balanced informed proposal
-  # This function computes the log of the product of the posterior and the ratio
-  # of base proposals.
-  # Only supernodes with up to `k` superedges can be birthed or killed.
-  # If `move = TRUE`, then only consider moves.
-  # If `move = FALSE`, then only consider birth/death steps.
-  p <- length(centers)
-  n_centers <- sum(centers)
-  
-  # Birth
-  log_prop_ratio_birth <- compute_log_base_proposal(
-    n_centers + 1L, n_centers, p, k, move
-  ) - compute_log_base_proposal(n_centers, n_centers + 1L, p, k, move)
-  
-  n_G_birth <- if (isTRUE(move) | n_centers == p) 0L else {
-    as.integer(if (k == Inf) 2^n_centers else sum(choose(n_centers, 0:k)))
-  }
-  
-  n_birth <- (p - n_centers) * n_G_birth
-  log_prod_birth <- numeric(n_birth)  # Product of posterior and base proposal
-  
-  for (ind in seq_len(n_birth)) {
-    tmp <- ind2prop(ind, centers, G, k)
-    
-    log_prod_birth[ind] <- log_prop_ratio_birth + compute_log_posterior(
-      tmp$centers_prop, tmp$G_prop, memoise_tree_activation_f,
-      memoise_posterior_no_G, memoise_Laplace, coars_pow, nested
-    )$log_ret
-  }
-  
-  # Death
-  n_death <- if (isTRUE(move) | n_centers == 1L) 0L else sum(colSums(G) <= k)
-  
-  log_prop_ratio_death <- compute_log_base_proposal(
-    n_centers - 1L, n_centers, p, k, move
-  ) - compute_log_base_proposal(n_centers, n_centers - 1L, p, k, move, n_death)
-  
-  log_prod_death <- numeric(n_death)
-  
-  for (ind in seq_len(n_death)) {
-    tmp <- ind2prop(n_birth + ind, centers, G, k)
-    
-    log_prod_death[ind] <- log_prop_ratio_death + compute_log_posterior(
-      tmp$centers_prop, tmp$G_prop, memoise_tree_activation_f,
-      memoise_posterior_no_G, memoise_Laplace, coars_pow, nested
-    )$log_ret
-  }
-  
-  # Move
-  n_move <- if (isFALSE(move)) 0L else n_centers * (p - n_centers)
-  log_prod_move <- numeric(n_move)
-  
-  for (ind in seq_len(n_move)) {
-    tmp <- ind2prop(ind, centers, G, k, move = TRUE)
-    
-    log_prod_move[ind] <- compute_log_posterior(
-      tmp$centers_prop, G, memoise_tree_activation_f, memoise_posterior_no_G,
-      memoise_Laplace, coars_pow, nested
-    )$log_ret
-  }
-  
-  return (list(
-    log_prod = c(log_prod_birth, log_prod_death, log_prod_move),
-    n_bdm = c(n_birth, n_death, n_move)
-  ))
-}
-
-
-# Log of the balancing function t / (1 + t)
-log_bal_fun <- function (log_t) log_t - qgam::log1pexp(log_t)
-
-
-take_MCMC_step_informed <- function (
-  centers, G, tmp_cur, memoise_tree_activation_f, memoise_posterior_no_G,
-  memoise_Laplace, coars_pow, nested, move
-) {
-  # Locally balanced informed proposal
-  # If `move = TRUE`, then only consider moves.
-  # If `move = FALSE`, then only consider birth/death steps.
-  p <- length(centers)
-  n_centers <- sum(centers)
-  
-  # Sample from the informed proposal
-  if (move & n_centers == p) {
-    return (list(centers = centers, G = G, tmp_cur = tmp_cur))
-  }
-  
-  # Maximum number of superedges affected by birth/death moves
-  # ($\kappa$ in the text)
-  k <- 1L
-  
-  log_prod_cur <- compute_log_prod(
-    centers, G, memoise_tree_activation_f, memoise_posterior_no_G,
-    memoise_Laplace, coars_pow, nested, k, move
-  )
-  
-  log_prop <- log_bal_fun(log_prod_cur$log_prod - tmp_cur$log_ret) + rep(c(
-    compute_log_base_proposal(n_centers, n_centers + 1L, p, k, move),  # Birth
-    compute_log_base_proposal(  # Death
-      n_centers, n_centers - 1L, p, k, move, log_prod_cur$n_bdm[2]
-    ),
-    compute_log_base_proposal(n_centers, n_centers, p, k, move)  # Move
-  ), log_prod_cur$n_bdm)
-  
-  log_prop <- log_prop - matrixStats::logSumExp(log_prop)
-  prop_ind <- sample.int(n = length(log_prop), size = 1L, prob = exp(log_prop))
-  prop_list <- ind2prop(prop_ind, centers, G, k, move)
-  centers_prop <- prop_list$centers_prop
-  G_prop <- prop_list$G_prop
-  
-  # Evaluate the reverse probability
   tmp_prop <- compute_log_posterior(
     centers_prop, G_prop, memoise_tree_activation_f, memoise_posterior_no_G,
-    memoise_Laplace, coars_pow, nested
+    memoise_Laplace, coars_pow_lik, nested, pi_se
   )
   
-  n_centers_prop <- sum(centers_prop)
+  R <- 0
   
-  log_prod_prop <- compute_log_prod(
-    centers_prop, G_prop, memoise_tree_activation_f, memoise_posterior_no_G,
-    memoise_Laplace, coars_pow, nested, k, move
-  )
+  if (!nested) {
+    # Proposal term considers the difference in number of edges times logit
+    R <- R + (nedges_G - nedges_G_prop) * (
+      log(pi_se_prop) - log(1 - pi_se_prop)
+    )
+  }
   
-  log_prop_rev <- log_bal_fun(
-    log_prod_prop$log_prod - tmp_prop$log_ret
-  ) + rep(c(
-    # Birth
-    compute_log_base_proposal(n_centers_prop, n_centers_prop + 1L, p, k, move),
-    # Death
-    compute_log_base_proposal(
-      n_centers_prop, n_centers_prop - 1L, p, k, move, log_prod_prop$n_bdm[2]
-    ),
-    # Move
-    compute_log_base_proposal(n_centers_prop, n_centers_prop, p, k, move)
-  ), log_prod_prop$n_bdm)
-  
-  log_prop_rev <- log_prop_rev - matrixStats::logSumExp(log_prop_rev)
-  cur_ind <- prop2ind(centers, G, centers_prop, G_prop, k, move)
-  
-  # Metropolis-Hastings step
-  if (runif(1) < exp(
-    tmp_prop$log_ret + log_prop_rev[cur_ind] - tmp_cur$log_ret -
-      log_prop[prop_ind]
-  )) {
+  if (runif(1L) < exp(R + tmp_prop$log_ret - tmp_cur$log_ret)) {
+    assignment <- assignment_prop
     centers <- centers_prop
     G <- G_prop
     tmp_cur <- tmp_prop
   }
   
-  return (list(centers = centers, G = G, tmp_cur = tmp_cur))
+  return (
+    list(assignment = assignment, centers = centers, G = G, tmp_cur = tmp_cur)
+  )
 }
 
 
@@ -893,28 +790,39 @@ get_superedge_mat <- function (assignment, G) {
 # likelihood should be preformed.
 # `n_iter` is the number of MCMC iterations after burn-in.
 # `log_cohesion` is the log of the cohesion function.
-# `prob_informed` is the probability at each MCMC iteration that the locally
-# balanced informed proposals are used.
 # `burnin` is the number of iterations discarded as burn-in,
 # which equals `n_iter %/% 10L` by default.
 # `coars_pow` is the coarsening parameter ($\zeta$ in the text).
+# `pi_se` is the prior superedge inclusion probability.
+# `pi_se_prop` is the superedge probability in the Metropolis-Hasting proposal.
+# `use_t` indicates whether to use a similarity function based on the matrix t
+# distribution.
 run_MCMC <- function (
-  X, nested, n_iter, log_cohesion, prob_informed = 0, burnin = NULL,
-  coars_pow = NULL
+  X, nested, n_iter, burnin = NULL, n_thin = n_thin, log_cohesion,
+  coars_pow = NULL, pi_se = NULL, pi_se_prop = NULL, use_t = FALSE
 ) {
   p <- NCOL(X)
   n <- NROW(X)
   if (is.null(burnin)) burnin <- n_iter %/% 10L
   if (is.null(coars_pow)) coars_pow <- 10 / n
+  if (is.null(pi_se)) pi_se <- 0.5
+  if (is.null(pi_se_prop)) pi_se_prop <- 0.5
+  
+  coars_pow_prior <- coars_pow
+  coars_pow_lik <- coars_pow
   X_cor <- abs(cor(X))
-  log_w_matrix <- compute_log_w_matrix(X, coars_pow)
+  log_w_matrix <- compute_log_w_matrix(X, coars_pow_prior)
   centers_MCMC <- matrix(data = NA, nrow = n_iter, ncol = p)
   superedge_mat <- matrix(0L, nrow = p, ncol = p)
   post_sim <- matrix(data = 0L, nrow = p, ncol = p)
   log_post_MCMC <- numeric(n_iter)
   G_MCMC <- vector(mode = "list", length = n_iter)
   
-  memoise_tree_activation_f <- memoise::memoise(f = function (ind) {
+  memoise_tree_activation_f <- memoise::memoise(f = if (use_t) function (ind) {
+    coars_pow * compute_log_simil_f_t(
+      X = X[, ind, drop = FALSE], n, length(ind)
+    )
+  } else function (ind) {
     compute_log_tree_activation_f(
       log_w_matrix = log_w_matrix[ind, ind], p = length(ind)
     )
@@ -930,7 +838,7 @@ run_MCMC <- function (
   )
   
   memoise_Laplace <- memoise::memoise(f = function (adj, U) {
-    coars_pow * log_p_GGM_Laplace(adj, df_0, U, n)
+    coars_pow_lik * log_p_GGM_Laplace(adj, df_0, U, n)
   }, cache = cachem::cache_mem(max_size = Inf))
   
   K_init <- 3L
@@ -943,57 +851,53 @@ run_MCMC <- function (
   
   n_centers <- sum(centers)
   
+  # Initilise assignments
+  assignment <- centers2tessellation(X_cor, centers)
+  
+  
   # Supergraph: initialize at empty
   G <- matrix(0L, nrow = n_centers, ncol = n_centers)
   
   tmp_cur <- compute_log_posterior(
     centers, G, memoise_tree_activation_f, memoise_posterior_no_G,
-    memoise_Laplace, coars_pow, nested
+    memoise_Laplace, coars_pow_lik, nested, pi_se
   )
   
   pb <- txtProgressBar(max = burnin + n_iter, style = 3)
   
   for (s in 1:(burnin + n_iter)) {
-    informed <- runif(1) < prob_informed
+    tmp <- take_birth_death_step(
+      X_cor, assignment, pi_se, pi_se_prop, centers, G, tmp_cur,
+      memoise_tree_activation_f, memoise_posterior_no_G, memoise_Laplace,
+      coars_pow_prior, coars_pow_lik, nested
+    )
     
-    tmp <- if (informed) {
-      # Locally balanced informed proposal
-      tmp <- take_MCMC_step_informed(
-        centers, G, tmp_cur, memoise_tree_activation_f, memoise_posterior_no_G,
-        memoise_Laplace, coars_pow, nested, move = FALSE
-      )
-      
-      centers <- tmp$centers
-      G <- tmp$G
-      tmp_cur <- tmp$tmp_cur
-      
-      take_MCMC_step_informed(
-        centers, G, tmp_cur, memoise_tree_activation_f, memoise_posterior_no_G,
-        memoise_Laplace, coars_pow, nested, move = TRUE
-      )
-    } else {
-      tmp <- take_birth_death_step(
-        centers, G, tmp_cur, memoise_tree_activation_f, memoise_posterior_no_G,
-        memoise_Laplace, coars_pow, nested
-      )
-      
-      tmp_cur <- tmp$tmp_cur
-      centers <- tmp$centers
-      G <- tmp$G
-      
-      take_move_step(
-        centers, G, tmp_cur, memoise_tree_activation_f, memoise_posterior_no_G,
-        memoise_Laplace, coars_pow, nested
-      )
-    }
-    
+    assignment <- tmp$assignment
     tmp_cur <- tmp$tmp_cur
     centers <- tmp$centers
     G <- tmp$G
     
     if (!nested) {
       # Update G by itself.
-      res <- update_G(G, n, tmp_cur, memoise_Laplace)
+      res <- update_G(G, n, tmp_cur, memoise_Laplace, pi_se)
+      G <- res$G
+      tmp_cur <- res$tmp_cur
+    }
+    
+    tmp <- take_move_step(
+      X_cor, assignment, pi_se, pi_se_prop, centers, G, tmp_cur,
+      memoise_tree_activation_f, memoise_posterior_no_G, memoise_Laplace,
+      coars_pow_prior, coars_pow_lik, nested
+    )
+    
+    assignment <- tmp$assignment
+    tmp_cur <- tmp$tmp_cur
+    centers <- tmp$centers
+    G <- tmp$G
+    
+    if (!nested) {
+      # Update G by itself.
+      res <- update_G(G, n, tmp_cur, memoise_Laplace, pi_se)
       G <- res$G
       tmp_cur <- res$tmp_cur
     }
@@ -1002,11 +906,7 @@ run_MCMC <- function (
       centers_MCMC[s - burnin, ] <- tmp$centers
       log_post_MCMC[s - burnin] <- tmp_cur$log_ret
       G_MCMC[[s - burnin]] <- G
-      assignment <- centers2tessellation(X_cor, centers)
-      
-      for (i in 1:p) {
-        post_sim[i, ] <- post_sim[i, ] + (assignment[i] == assignment)
-      }
+      post_sim <- post_sim + outer(assignment, assignment, "==")
       
       if (!nested) {
         # Keep track of the superedges.
@@ -1022,10 +922,8 @@ run_MCMC <- function (
   if (nested) {
     # Inner MCMC
     # Compute the superedge inclusion probabilities for the nested MCMC.
-    superedge_prob <- 0.5
-    n_recorded <- min(1e3L, n_iter %/% 10L)
-    n_thin <- n_iter %/% n_recorded
-    superedge_mat <- matrix(0L, nrow = p, ncol = p)
+    n_recorded <- n_iter %/% n_thin
+    superedge_mat <- matrix(0, nrow = p, ncol = p)
     print("Running inner MCMC...")
     set.seed(1L)
     pb <- txtProgressBar(max = n_recorded, style = 3)
@@ -1033,20 +931,13 @@ run_MCMC <- function (
     for (s in 1:n_recorded) {
       centers <- centers_MCMC[s * n_thin, ]
       n_centers <- sum(centers)
-      if (n_centers == 1L) next
       assignment <- centers2tessellation(X_cor, centers)
       U <- compute_U_unaugmented(X, assignment)
       
-      # Supergraph: initialize at prior draw
+      # Supergraph: initialize to empty graph.
       G <- matrix(0L, nrow = n_centers, ncol = n_centers)
       
-      G[upper.tri(G)] <- rbinom(
-        n = (n_centers * (n_centers - 1L)) %/% 2L, size = 1L,
-        prob = superedge_prob
-      )
-      
-      G <- G + t(G)
-      for (s_inner in 1:1e3L) G <- update_G_WWA(G, superedge_prob, 3, U, n)
+      for (s_inner in 1:1000) G <- update_G_WWA(G, pi_se, 3, U, n, 1)
       superedge_mat <- superedge_mat + get_superedge_mat(assignment, G)
       setTxtProgressBar(pb, s)
     }

@@ -1,23 +1,12 @@
+// [[Rcpp::depends(RcppBlaze)]]
+// [[Rcpp::plugins(cpp17)]]
 #include <cmath>
 #include <iostream>
 #include <vector>
 
-// This code was tested using Blaze version 3.8.0
-// (https://bitbucket.org/blaze-lib/blaze/src/master/) with the fix from this
-// pull request: https://bitbucket.org/blaze-lib/blaze/pull-requests/46.
-#include <blaze/math/DynamicMatrix.h>
-#include <blaze/math/DynamicVector.h>
-#include <blaze/math/Column.h>
-#include <blaze/math/Columns.h>
-#include <blaze/math/Row.h>
-#include <blaze/math/Rows.h>
-#include <blaze/math/Elements.h>
-#include <blaze/math/Subvector.h>
-#include <blaze/math/Band.h>
-
-
-#include <Rcpp.h>
-// [[Rcpp::plugins(cpp17)]]
+// Avoid OpenMP linker error on Windows:
+#define BLAZE_USE_SHARED_MEMORY_PARALLELIZATION 0
+#include <RcppBlaze.h>
 
 
 

@@ -1,8 +1,10 @@
 // [[Rcpp::depends(BH)]]
+// [[Rcpp::depends(RcppBlaze)]]
 // [[Rcpp::plugins(cpp17)]]
 
 // OpenMP can be enabled by "// [[Rcpp::plugins(openmp)]]" but requires
-// additional compiler flags on macOS.
+// additional compiler flags on macOS, and the OpenMP code is commented out
+// (see line 398) due to an OpenMP issue on Windows when using RcppBlaze.
 
 #include <algorithm>
 #include <array>
@@ -14,20 +16,9 @@
 #include <tuple>
 #include <vector>
 
-// This code was tested using Blaze version 3.8.0
-// (https://bitbucket.org/blaze-lib/blaze/src/master/) with the fix from this
-// pull request: https://bitbucket.org/blaze-lib/blaze/pull-requests/46.
-// Avoid nested parallization error:
+// Avoid OpenMP linker error on Windows:
 #define BLAZE_USE_SHARED_MEMORY_PARALLELIZATION 0
-#include <blaze/math/DynamicMatrix.h>
-#include <blaze/math/LowerMatrix.h>
-#include <blaze/math/DynamicVector.h>
-#include <blaze/math/Column.h>
-#include <blaze/math/Columns.h>
-#include <blaze/math/Row.h>
-#include <blaze/math/Rows.h>
-#include <blaze/math/Elements.h>
-#include <blaze/math/Submatrix.h>
+#include <RcppBlaze.h>
 
 // The distributions in `<random>` are not portable. That is, they do not
 // yield the same random numbers on different machines. Therefore, we use the
@@ -36,8 +27,6 @@
 #include <boost/random/normal_distribution.hpp>
 #include <boost/random/uniform_01.hpp>
 #include <boost/random/uniform_int_distribution.hpp>
-
-#include <Rcpp.h>
 
 
 
@@ -403,9 +392,10 @@ std::tuple<
         log_q_rm = std::log(proposal_G_es(p, n_e - 1, n_e));
 
     // Fused triangular loop based on 
-    // https://stackoverflow.com/a/33836073/5216563 as OnepMP does not support
+    // https://stackoverflow.com/a/33836073/5216563 as OpenMP does not support
     // collapsing triangular loops.
-    #pragma omp parallel for schedule(static) private(Phi)
+    // Commented out to avoid OpenMP linker error with RcppBlaze on Windows.
+    // #pragma omp parallel for schedule(static) private(Phi)
     for (int e_id = 0; e_id < p * (p - 1) / 2; e_id++) {
         int i = e_id / p, j = e_id % p;
 

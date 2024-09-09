@@ -1,18 +1,20 @@
-### Graph sphere: Application to gene expression data
+### Graph of graphs: Application to gene expression data
 
-# Code for the application with gene expression data in the paper "Graph Sphere:
-# From Nodes to Supernodes in Graphical Models" by Willem van den Boom, Maria De
-# Iorio, Alexandros Beskos and Ajay Jasra.
+# Code for the application with gene expression data in the paper "Graph of
+# Graphs: From Nodes to Supernodes in Graphical Models" by Maria De Iorio,
+# Willem van den Boom, Alexandros Beskos, Ajay Jasra and Andrea Cremaschi.
 
 
+pkgs <- c(
+  "BiocManager", "ggplot2", "fossil", "glasso", "httr", "igraph", "remotes"
+)
 
-print("Installing required packages...")
-pkgs <- c("BiocManager", "ggplot2", "glasso", "httr", "igraph", "remotes")
 pkgs <- pkgs[!pkgs %in% rownames(installed.packages())]
 
-if (length(pkgs) > 0L) install.packages(
-  pkgs = pkgs, dependencies = TRUE, repos = "https://cloud.r-project.org"
-)
+if (length(pkgs) > 0L) {
+  print("Installing required packages...")
+  install.packages(pkgs = pkgs, repos = "https://cloud.r-project.org")
+}
 
 pkgs <- c(
   "clusterProfiler", "enrichplot", "org.Hs.eg.db", "readxl", "RTCGA",
@@ -22,7 +24,8 @@ pkgs <- c(
 pkgs <- pkgs[!pkgs %in% rownames(installed.packages())]
 
 if (length(pkgs) > 0L) {
-  BiocManager::install(pkgs = pkgs, dependencies = TRUE, update = FALSE)
+  print("Installing required Bioconductor packages...")
+  BiocManager::install(pkgs = pkgs, update = FALSE)
 }
 
 
@@ -111,22 +114,32 @@ X <- apply(X = X, MARGIN = 2L, FUN = quantile_normalize)
 
 
 
-source("graph_sphere_MCMC.R")
+source("graph_of_graphs_MCMC.R")
 p <- ncol(X)
 log_cohesion = dnbinom(x = 0:(p - 1L), size = 2, prob = 1 / 6, log = TRUE)
-n_iter <- 1e5L
+
+burnin <- 40000
+n_iter <- 10000
+n_thin <- 10
 
 set.seed(1L)
 print("Running MCMC with coarsening of the likelihood...")
 
+pi_se <- 0.1
+pi_se_prop <- 0.1
+
 res_coars <- run_MCMC(
-  X = X, nested = FALSE, n_iter = n_iter, log_cohesion = log_cohesion
+  X = X, nested = FALSE, n_iter = n_iter, burnin = burnin, n_thin = n_thin, 
+  log_cohesion = log_cohesion, pi_se = pi_se, pi_se_prop = pi_se_prop
 )
 
+
+set.seed(1L)
 print("Running nested MCMC...")
 
 res_nested <- run_MCMC(
-  X = X, nested = TRUE, n_iter = n_iter, log_cohesion = log_cohesion
+  X = X, nested = TRUE, n_iter = n_iter, burnin = burnin, n_thin = n_thin, 
+  log_cohesion = log_cohesion, pi_se = pi_se, pi_se_prop = pi_se_prop
 )
 
 
@@ -213,7 +226,11 @@ plot_sim_mat <- function (
     ylab = "Node",
     at = seq(from = 0, to = 1, length.out = n_levels + 1L),
     scales = list(draw = FALSE),
-    colorkey = list(space = "bottom", title = label),
+    colorkey = if (label == "Posterior coclustering probability") {
+      list(space = "bottom", title = label)
+    } else {
+      FALSE
+    },
     panel = function (...) {
       lattice::panel.levelplot(...)
       
@@ -228,6 +245,8 @@ plot_sim_mat <- function (
 
 ind_reorder <- get_order(res_nested)
 library(latticeExtra)
+
+
 pdf("gene_post_sim.pdf", width = 8L, height = 5L)
 
 print(c(
@@ -238,16 +257,18 @@ print(c(
 ))
 
 dev.off()
-pdf("gene_superedge.pdf", width = 8L, height = 5L)
+
+
+pdf("gene_superedge_medianG.pdf", width = 8L, height = 5L)
 
 print(c(
   "Coarsened likelihood" = plot_sim_mat(
     res = res_coars, ind_reorder = ind_reorder,
-    sim_mat = res_coars$superedge_mat,
+    sim_mat = round(res_coars$superedge_mat),
     label = "Posterior superedge probability"
   ), "Nested MCMC" = plot_sim_mat(
     res = res_nested, ind_reorder = ind_reorder,
-    sim_mat = res_nested$superedge_mat
+    sim_mat = round(res_nested$superedge_mat)
   ),
   layout = c(2L, 1L), merge.legends = FALSE
 ))
@@ -321,6 +342,8 @@ for (k in 1:K_coars) supernode_coars[assignment_coars == tmp[k]] <- formatC(
   x = k, width = 2, format = "d", flag = "0"
 )
 
+fossil::rand.index(assignment_coars, assignment_nested)
+
 
 library(org.Hs.eg.db)
 library(clusterProfiler)
@@ -364,15 +387,15 @@ dotplot(
   size = "Gene ratio"
 ) + scale_size_continuous(range = c(2, 5.5))
 
-ggsave(filename = "GOenrichment.pdf", width = 11.5, height = 10)
+ggsave(filename = "GOenrichment.pdf", width = 15, height = 10)
 
 
 
-print("Plotting the graph sphere...")
+print("Plotting the graph of graphs...")
 library(igraph)
 
 
-# Modified version of `igraph::plot.igraph` to visualize a graph sphere
+# Modified version of `igraph::plot.igraph` to visualize a graph of graphs
 plot.igraph2 <- function (x, supergraph_adj, axes = FALSE, add = FALSE, xlim = c(-1, 1), ylim = c(-1, 
                                                                                                   1), mark.groups = list(), mark.shape = 1/2, mark.col = rainbow(length(mark.groups), 
                                                                                                                                                                  alpha = 0.3), mark.border = rainbow(length(mark.groups), 
@@ -764,10 +787,8 @@ plot.igraph2 <- function (x, supergraph_adj, axes = FALSE, add = FALSE, xlim = c
 # Estimate the supergraph with the tessellation fixed.
 
 
-# Function that runs MCMC and generates output for the supergraph only
-run_MCMC_G_only <- function (
-    X, assignment, n_iter, burnin = NULL
-) {
+# Function that runs MCMC and generates output for the supergraph only.
+run_MCMC_G_only <- function (X, assignment, n_iter, burnin = NULL, pi_se) {
   if (is.null(burnin)) burnin <- n_iter %/% 10L
   n <- nrow(X)
   n_centers <- max(assignment)
@@ -775,13 +796,13 @@ run_MCMC_G_only <- function (
   super_edge_mat <- matrix(data = 0L, nrow = n_centers, ncol = n_centers)
   U <- compute_U_unaugmented(X = X, assignment = assignment)
   
-  # Supergraph: initialize at empty
+  # Supergraph: initialize at empty.
   G <- matrix(0L, nrow = n_centers, ncol = n_centers)
   
   pb <- txtProgressBar(max = burnin + n_iter, style = 3)
   
   for (s in 1:(burnin + n_iter)) {
-    G <- update_G_WWA(G, 0.5, 3, U, n)
+    G <- update_G_WWA(G, pi_se, 3, U, n, 1L)
     
     if (s > burnin) {
       G_MCMC[s - burnin, , ] <- G
@@ -799,37 +820,61 @@ run_MCMC_G_only <- function (
 }
 
 
-
 print("Running MCMC on the supergraph with the tessellation fixed...")
 set.seed(1L)
-res_G <- run_MCMC_G_only(X = X, assignment = assignment_nested, n_iter = 1e5L)
-supergraph_adj <- res_G$superedge_mat > 0.99
 
-print("Point estimate of the supergraph with 0.99 edge inclusion threshold:")
-print(igraph::graph_from_adjacency_matrix(
-  adjmatrix = supergraph_adj, mode = "undirected", diag = FALSE
-))
-
-p_k_sub <- sort(table(assignment_nested))[K_nested:1]
-p_sub <- sum(p_k_sub)
-reorder_supernodes <- as.integer(names(p_k_sub))
-
-super_layout <- graphlayouts::layout_with_stress(
-  g = igraph::graph_from_adjacency_matrix(
-    adjmatrix = supergraph_adj[reorder_supernodes, reorder_supernodes],
-    mode = "undirected", diag = FALSE
-  ), tol = 1e-8, mds = TRUE
+res_G <- run_MCMC_G_only(
+  X = X, assignment = assignment_nested, n_iter = 1e5L, pi_se = pi_se
 )
 
-G_list <- vector(mode = "list", length = K_nested)
+mod_ind <- rep(1:6, mod_sizes)
+set.seed(332211)
+supergraph_adj <- res_G$superedge_mat > 0.99
+print(paste("No. of superedge pr. > 0.5:", sum(res_G$superedge_mat > 0.5) / 2))
+print(paste("No. of superedge pr. > 0.99:", sum(supergraph_adj) / 2))
+
+K_sub <- max(assignment_nested)
+p_k_sub <- sort(table(assignment_nested))[K_sub:1]
+p_sub <- sum(p_k_sub)
+selected_supernodes <- as.integer(names(p_k_sub))
+
+super_layout <- graphlayouts::layout_with_stress(
+  igraph::graph_from_adjacency_matrix(
+    adjmatrix = supergraph_adj[selected_supernodes, selected_supernodes],
+    mode = "undirected", diag = FALSE
+  ),
+  tol = 1e-8, mds = TRUE
+)
+
+obj <- igraph::graph_from_adjacency_matrix(
+  adjmatrix = supergraph_adj[selected_supernodes, selected_supernodes],
+  mode = "undirected", diag = FALSE
+) %>% add_layout_(nicely())
+
+
+super_layout <- obj$layout
+
+# Manually adjust `super_layout`
+adjust <- function (ind, x = 0, y = 0) {
+  super_layout[ind, 1] <<- super_layout[ind, 1] + x
+  super_layout[ind, 2] <<- super_layout[ind, 2] + y
+}
+
+
+adjust(21, +0.2, -2.5)
+adjust(22, -0.1, -0.1)
+
+s_sub <- assignment_nested[assignment_nested %in% selected_supernodes]
+G_list <- vector(mode = "list", length = K_sub)
 layout <- matrix(NA_real_, nrow = p_sub, ncol = 2L)
+super_layout <- 15 * super_layout
 
 # Compute MAP (maximum a posteriori) estimates of the trees using `log_w_matrix`
 # These estimates do not depend on the coarsening parameter `coars_pow`.
 log_w_matrix <- compute_log_w_matrix(X = X, coars_pow = 1)
 
-for (k in 1:K_nested) {
-  ind <- which(assignment_nested == reorder_supernodes[k])
+for (k in 1:K_sub) {
+  ind <- which(s_sub == selected_supernodes[k])
   
   G_list[[k]] <- igraph::mst(igraph::graph_from_adjacency_matrix(
     adjmatrix = -log_w_matrix[ind, ind, drop = FALSE], mode = "undirected",
@@ -838,38 +883,44 @@ for (k in 1:K_nested) {
   
   igraph::V(G_list[[k]])$name <- as.character(ind)
   
-  # Permute the nodes using depth-first search for pretty plotting.
+  # Permute the nodes using depth-first search for pretty plotting
   G_list[[k]] <- igraph::permute(graph = G_list[[k]], permutation = order(
     igraph::dfs(
       graph = G_list[[k]], root = which.min(igraph::degree(G_list[[k]]))
     )$order
   ))
   
+  # tmp <- k / K_sub * 2 * pi
+  
   layout[sum(p_k_sub[seq_len(k - 1L)]) + 1:p_k_sub[k], ] <- t(
-    15 * super_layout[k, ] + t(igraph::layout_as_tree(
+    super_layout[k, ] + t(igraph::layout_as_tree(
       graph = G_list[[k]], circular = TRUE
     ))
   )
 }
 
 G_block <- igraph:::union.igraph(G_list, byname = TRUE)
-tmp <- list(membership = assignment_nested[as.integer(igraph::V(G_block)$name)])
+tmp <- list(membership = s_sub[as.integer(igraph::V(G_block)$name)])
 class(tmp) <- "communities"
 
 cols <- RColorBrewer::brewer.pal(
   n = 6L, name = "Set1"
 )[c(3L, 1L, 2L, 4L, 5L, 6L)]
 
-mod_ind <- rep(1:6, mod_sizes)
 
-pdf("gene_graph_sphere_nested.pdf", width = 8, height = 8)
+
+pdf("gene_graph_of_graphs.pdf", width = 8, height = 8)
 par(mar = c(0, 0, 0, 0))
 
 plot.igraph2(
   x = G_block, supergraph_adj = supergraph_adj, mark.groups = tmp,
   mark.col = scales::alpha("white", 0.5), mark.border = "darkgray",
   mark.expand = 6, vertex.size = 1.5,
-  vertex.color = cols[mod_ind[as.integer(V(G_block)$name)]],
+  vertex.color = cols[
+    mod_ind[assignment_nested %in% selected_supernodes][as.integer(
+      V(G_block)$name
+    )]
+  ],
   vertex.label = "", edge.color = "black", layout = layout[, 2:1],
   xlim = c(-1.01, 1)
 )
@@ -883,16 +934,20 @@ dev.off()
 
 
 
-print("Plotting graphical lasso estimate...")
 pdf("gene_glasso.pdf", width = 16, height = 8)
 par(mar = c(0, 0, 1, 0), mfrow = c(1L, 2L))
 
 for (i in 1:2) {
   igraph::plot.igraph(
     x = igraph::graph_from_adjacency_matrix(adjmatrix = glasso::glasso(
-      s = crossprod(X) / nrow(X), rho = 0.5568  # No. of edges matches `G_block`.
+      s = crossprod(X) / nrow(X),
+      rho = 0.5568  # No. of edges matches `G_block`.
     )$wi != 0, mode = "undirected", diag = FALSE), vertex.size = 1.5,
-    vertex.color = cols[mod_ind[as.integer(V(G_block)$name)]],
+    vertex.color = cols[
+      mod_ind[assignment_nested %in% selected_supernodes][as.integer(
+        V(G_block)$name
+      )]
+    ],
     vertex.label = "", edge.color = "black", layout = if (i == 1) layout[, 2:1],
     xlim = c(-1.01, 1), main = c("Fixed layout", "Automatic layout")[i]
   )
@@ -945,7 +1000,7 @@ print(n_e_between / n_e_possible_between)
 
 
 
-print("Inspecting gene interactions in the graph sphere...")
+print("Inspecting gene interactions in the graph of graphs...")
 string_db <- STRINGdb::STRINGdb$new(version = "12.0", network_type = "full")
 
 mapped <- string_db$map(
@@ -995,10 +1050,46 @@ boxplot(
   ), label = factor(x = rep(levels, c(
     K_nested, sum(supergraph_adj), sum(!supergraph_adj)
   )), levels = levels)), range = 0, xlab = "",
-  ylab = "Proportion of gene pairs with an interaction", ylim = c(0, 0.25)
+  ylab = "Proportion of gene pairs with an interaction", ylim = c(0, .85)
 )
 
 dev.off()
 
-max(prop_between, na.rm = TRUE)
-max(prop_between_no_diag, na.rm = TRUE)
+
+print("Plotting trace plots of the inner MCMC...")
+n_iter_inner <- n_iter / n_thin
+
+
+get_inner_trace <- function (iter) {
+  n_centers <- sum(res_nested$centers_MCMC[iter, ])
+  set.seed(iter)
+  
+  res_tmp <- run_MCMC_G_only(
+    X = X, assignment = res_nested$assignment_MCMC[iter, ],
+    n_iter = n_iter_inner, burnin = 1L, pi_se = pi_se
+  )
+  
+  return (as.integer(apply(res_tmp$G_MCMC, 1, sum)) %/% 2L)
+}
+
+
+iter_vec <- c(4000L, 7000L, 10000L)
+n_i <- length(iter_vec)
+mat_trace <- matrix(data = NA_integer_, nrow = n_i, ncol = n_iter_inner)
+
+for (i in 1:n_i) {
+  print(i)
+  mat_trace[i, ] <- get_inner_trace(iter_vec[i])
+}
+
+pdf("trace_inner_MCMC.pdf", width = 8L, height = 3L)
+par(xaxs = "i", mar = c(4, 4, 1, 1))
+cols <- RColorBrewer::brewer.pal(n = 3L, name = "Set1")
+
+plot(
+  mat_trace[1, ], type = "l", ylim = range(mat_trace), col = cols[1],
+  xlab = "Inner MCMC iteration", ylab = "Number of superedges", lwd = 2
+)
+
+for (i in 2:n_i) lines(mat_trace[i, ], col = cols[i], lwd = 2)
+dev.off()
