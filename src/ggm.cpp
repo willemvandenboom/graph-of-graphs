@@ -22,7 +22,7 @@
 
 // The distributions in `<random>` are not portable. That is, they do not
 // yield the same random numbers on different machines. Therefore, we use the
-// distributions from Boost, which are protable.
+// distributions from Boost, which are portable.
 #include <boost/random/chi_squared_distribution.hpp>
 #include <boost/random/normal_distribution.hpp>
 #include <boost/random/uniform_01.hpp>
